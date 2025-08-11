@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { verifyToken } from '@/lib/auth';
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -16,31 +15,10 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // For protected API routes
+  // For API routes, let the API route handlers handle authentication
+  // since edge runtime doesn't support crypto module needed for JWT verification
   if (pathname.startsWith('/api/')) {
-    const authHeader = request.headers.get('authorization');
-    
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
-    const token = authHeader.substring(7);
-    const user = verifyToken(token);
-
-    if (!user) {
-      return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
-    }
-
-    // Add user info to headers for API routes
-    const requestHeaders = new Headers(request.headers);
-    requestHeaders.set('x-user-id', user.id.toString());
-    requestHeaders.set('x-user-permissions', JSON.stringify(user.permissions));
-
-    return NextResponse.next({
-      request: {
-        headers: requestHeaders,
-      },
-    });
+    return NextResponse.next();
   }
 
   // For protected page routes, redirect to login if no token in cookie/localStorage
