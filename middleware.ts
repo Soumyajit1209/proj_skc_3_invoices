@@ -33,7 +33,7 @@ export function middleware(request: NextRequest) {
 
     // Add user info to headers for API routes
     const requestHeaders = new Headers(request.headers);
-    requestHeaders.set('x-user-id', user.userId.toString());
+    requestHeaders.set('x-user-id', user.id.toString());
     requestHeaders.set('x-user-permissions', JSON.stringify(user.permissions));
 
     return NextResponse.next({

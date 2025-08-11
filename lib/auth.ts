@@ -1,70 +1,58 @@
-import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
-import { NextRequest } from 'next/server';
-import { prisma } from './prisma';
 
-export interface JWTPayload {
-  userId: number;
+import jwt, { Secret, SignOptions } from 'jsonwebtoken';
+import { NextRequest } from 'next/server';
+import { Database, MasterUser } from './db';
+
+
+const JWT_SECRET: Secret = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_EXPIRES_IN = (process.env.JWT_EXPIRES_IN || '7d') as jwt.SignOptions['expiresIn'];
+
+export interface User {
+  id: number;
   username: string;
   fullName: string;
-  permissions: {
-    departmentId: number;
-    departmentCode: string;
-    canRead: boolean;
-    canWrite: boolean;
-    canDelete: boolean;
-  }[];
+  email: string;
+  role: string;
+  permissions: string[];
 }
 
-export async function hashPassword(password: string): Promise<string> {
-  return bcrypt.hash(password, 12);
+export interface TokenPayload {
+  userId: number;
+  username: string;
+  role: string;
+  iat?: number;
+  exp?: number;
 }
 
-export async function verifyPassword(password: string, hashedPassword: string): Promise<boolean> {
-  return bcrypt.compare(password, hashedPassword);
-}
-
-export function generateToken(payload: JWTPayload): string {
-  return jwt.sign(payload, process.env.JWT_SECRET!, { expiresIn: '24h' });
-}
-
-export function verifyToken(token: string): JWTPayload | null {
+// Authenticate user with username and password
+export async function authenticateUser(username: string, password: string): Promise<User | null> {
   try {
-    return jwt.verify(token, process.env.JWT_SECRET!) as JWTPayload;
-  } catch {
-    return null;
-  }
-}
-
-export async function authenticateUser(username: string, password: string): Promise<JWTPayload | null> {
-  try {
-    const user = await prisma.masterUser.findUnique({
-      where: { username, is_active: true },
-      include: {
-        departmentAccess: {
-          include: {
-            department: true
-          }
-        }
-      }
-    });
-
-    if (!user || !await verifyPassword(password, user.password)) {
+    const userQuery = `
+      SELECT user_id, user_name, name_display, user_email, role, password, status
+      FROM master_user 
+      WHERE user_name = ? AND status = 1
+    `;
+    
+    const user = await Database.queryFirst<MasterUser>(userQuery, [username]);
+    
+    if (!user) {
       return null;
     }
 
-    const permissions = user.departmentAccess.map(access => ({
-      departmentId: access.department_id,
-      departmentCode: access.department.department_code,
-      canRead: access.can_read,
-      canWrite: access.can_write,
-      canDelete: access.can_delete
-    }));
+    // Plain text password comparison
+    const isPasswordValid = password === user.password;
+    if (!isPasswordValid) {
+      return null;
+    }
+
+    const permissions = await getUserPermissions(user.user_id, user.role);
 
     return {
-      userId: user.id,
-      username: user.username,
-      fullName: user.full_name,
+      id: user.user_id,
+      username: user.user_name,
+      fullName: user.name_display,
+      email: user.user_email,
+      role: user.role,
       permissions
     };
   } catch (error) {
@@ -73,22 +61,211 @@ export async function authenticateUser(username: string, password: string): Prom
   }
 }
 
+// Get user permissions based on department access
+async function getUserPermissions(userId: number, role: string): Promise<string[]> {
+  try {
+    const permissionsQuery = `
+      SELECT DISTINCT d.department_name, da.department_access_id
+      FROM master_user_department_access da
+      JOIN master_user_department d ON da.department_id = d.department_id
+      WHERE da.user_id = ?
+    `;
+    
+    const departments = await Database.query(permissionsQuery, [userId]);
+    const permissions = departments.map(dept => dept.department_name);
+
+    if (role === 'admin') {
+      permissions.push('SALES', 'PURCHASE', 'INVENTORY', 'MASTERS', 'REPORTS');
+    } else if (role === 'manager') {
+      permissions.push('SALES', 'INVENTORY', 'REPORTS');
+    } else {
+      permissions.push('SALES');
+    }
+
+    return Array.from(new Set(permissions)); // avoids --downlevelIteration issue
+  } catch (error) {
+    console.error('Error fetching permissions:', error);
+    return ['SALES'];
+  }
+}
+
+// Generate JWT token
+export function generateToken(user: User): string {
+  const payload: TokenPayload = {
+    userId: user.id,
+    username: user.username,
+    role: user.role
+  };
+
+  const options: SignOptions = { expiresIn: JWT_EXPIRES_IN };
+
+  return jwt.sign(payload, JWT_SECRET, options);
+}
+
+// Verify JWT token
+export function verifyToken(token: string): User | null {
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as TokenPayload;
+    
+    return {
+      id: payload.userId,
+      username: payload.username,
+      fullName: '',
+      email: '',
+      role: payload.role,
+      permissions: []
+    };
+  } catch (error) {
+    console.error('Token verification error:', error);
+    return null;
+  }
+}
+
+// Extract token from request
 export function getTokenFromRequest(request: NextRequest): string | null {
   const authHeader = request.headers.get('authorization');
+  
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    return authHeader.substring(7);
+    return authHeader.slice(7);
   }
+  
   return null;
 }
 
-export function hasPermission(user: JWTPayload, departmentCode: string, action: 'read' | 'write' | 'delete'): boolean {
-  const permission = user.permissions.find(p => p.departmentCode === departmentCode);
-  if (!permission) return false;
+// Check if user has specific permission
+export function hasPermission(user: User, module: string, action: 'read' | 'write' | 'delete'): boolean {
+  if (user.role === 'admin') {
+    return true;
+  }
+  
+  if (user.role === 'manager') {
+    return action !== 'delete' && ['SALES', 'INVENTORY', 'REPORTS'].includes(module);
+  }
+  
+  return action === 'read' && module === 'SALES';
+}
 
-  switch (action) {
-    case 'read': return permission.canRead;
-    case 'write': return permission.canWrite;
-    case 'delete': return permission.canDelete;
-    default: return false;
+// Create new user (plain text password)
+export async function createUser(userData: {
+  username: string;
+  password: string;
+  fullName: string;
+  email: string;
+  role: string;
+  phone?: string;
+  designation?: string;
+}): Promise<number> {
+  try {
+    const insertQuery = `
+      INSERT INTO master_user (
+        user_name, password, name_display, user_email, role, 
+        contact_no, designation, status, verify_otp
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0)
+    `;
+    
+    const userId = await Database.insert(insertQuery, [
+      userData.username,
+      userData.password, // storing plain text
+      userData.fullName,
+      userData.email,
+      userData.role,
+      userData.phone || '',
+      userData.designation || '',
+    ]);
+    
+    return userId;
+  } catch (error) {
+    console.error('Create user error:', error);
+    throw error;
+  }
+}
+
+// Update user
+export async function updateUser(userId: number, userData: Partial<{
+  username: string;
+  fullName: string;
+  email: string;
+  role: string;
+  phone: string;
+  designation: string;
+  status: number;
+}>): Promise<boolean> {
+  try {
+    const fields = [];
+    const values = [];
+    
+    if (userData.username) {
+      fields.push('user_name = ?');
+      values.push(userData.username);
+    }
+    if (userData.fullName) {
+      fields.push('name_display = ?');
+      values.push(userData.fullName);
+    }
+    if (userData.email) {
+      fields.push('user_email = ?');
+      values.push(userData.email);
+    }
+    if (userData.role) {
+      fields.push('role = ?');
+      values.push(userData.role);
+    }
+    if (userData.phone) {
+      fields.push('contact_no = ?');
+      values.push(userData.phone);
+    }
+    if (userData.designation) {
+      fields.push('designation = ?');
+      values.push(userData.designation);
+    }
+    if (userData.status !== undefined) {
+      fields.push('status = ?');
+      values.push(userData.status);
+    }
+    
+    if (fields.length === 0) {
+      return false;
+    }
+    
+    values.push(userId);
+    
+    const updateQuery = `UPDATE master_user SET ${fields.join(', ')} WHERE user_id = ?`;
+    const affectedRows = await Database.execute(updateQuery, values);
+    
+    return affectedRows > 0;
+  } catch (error) {
+    console.error('Update user error:', error);
+    throw error;
+  }
+}
+
+// Get user by ID
+export async function getUserById(userId: number): Promise<User | null> {
+  try {
+    const userQuery = `
+      SELECT user_id, user_name, name_display, user_email, role, status
+      FROM master_user 
+      WHERE user_id = ?
+    `;
+    
+    const user = await Database.queryFirst<MasterUser>(userQuery, [userId]);
+    
+    if (!user) {
+      return null;
+    }
+
+    const permissions = await getUserPermissions(user.user_id, user.role);
+
+    return {
+      id: user.user_id,
+      username: user.user_name,
+      fullName: user.name_display,
+      email: user.user_email,
+      role: user.role,
+      permissions
+    };
+  } catch (error) {
+    console.error('Get user error:', error);
+    return null;
   }
 }

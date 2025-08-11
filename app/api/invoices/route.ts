@@ -1,11 +1,16 @@
+export const config = {
+  runtime: 'nodejs',
+};
+
 import { NextRequest, NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
-import { RedisCache } from '@/lib/redis';
+import { Database } from '@/lib/db';
 import { verifyToken, getTokenFromRequest, hasPermission } from '@/lib/auth';
-import { GSTEInvoiceAPI, buildEInvoicePayload } from '@/lib/gst-api';
 import { generateInvoicePDF, numberToWords } from '@/lib/pdf';
 
-export async function GET(request: NextRequest) {
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { id: string } }
+) {
   try {
     const token = getTokenFromRequest(request);
     if (!token) {
@@ -17,215 +22,85 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    const { searchParams } = new URL(request.url);
-    const page = parseInt(searchParams.get('page') || '1');
-    const limit = parseInt(searchParams.get('limit') || '50');
-    const search = searchParams.get('search') || '';
-
-    const cacheKey = RedisCache.getCacheKey('invoices', page, limit, search);
-    const cachedData = await RedisCache.get(cacheKey);
+    const invoiceId = parseInt(params.id);
     
-    if (cachedData) {
-      return NextResponse.json(cachedData);
+    // Get invoice with customer details
+    const invoice = await Database.queryFirst(`
+      SELECT 
+        ti.*,
+        mc.customer_name,
+        mc.customer_address,
+        mc.customer_state_name,
+        mc.customer_gst_in as customer_gstin
+      FROM tax_invoice ti
+      JOIN master_customer mc ON ti.customer_id = mc.customer_id
+      WHERE ti.tax_invoice_id = ?
+    `, [invoiceId]);
+
+    if (!invoice) {
+      return NextResponse.json({ error: 'Invoice not found' }, { status: 404 });
     }
 
-    const skip = (page - 1) * limit;
-    
-    const searchCondition = search ? {
-      OR: [
-        { invoice_number: { contains: search } },
-        { customer: { customer_name: { contains: search } } },
-        { irn: { contains: search } }
-      ]
-    } : {};
+    // Get invoice details
+    const details = await Database.query(`
+      SELECT 
+        tid.*,
+        mfp.prod_name as item_name,
+        tid.hsn_sac_code as hsn_code,
+        mfpu.per_name as unit
+      FROM tax_invoice_details tid
+      LEFT JOIN master_finished_product mfp ON tid.prod_id = mfp.prod_id
+      LEFT JOIN master_finished_product_unit mfpu ON tid.per_id = mfpu.per_id
+      WHERE tid.tax_invoice_id = ?
+    `, [invoiceId]);
 
-    const [invoices, total] = await Promise.all([
-      prisma.taxInvoice.findMany({
-        skip,
-        take: limit,
-        where: searchCondition,
-        include: {
-          customer: true,
-          details: true
-        },
-        orderBy: { id: 'desc' }
-      }),
-      prisma.taxInvoice.count({ where: searchCondition })
-    ]);
-
-    const result = {
-      data: invoices,
-      pagination: {
-        currentPage: page,
-        totalPages: Math.ceil(total / limit),
-        totalItems: total,
-        itemsPerPage: limit
-      }
+    const invoiceData = {
+      invoiceNumber: invoice.invoice_no,
+      invoiceDate: new Date(invoice.invoice_date).toLocaleDateString('en-IN'),
+      irn: invoice.irn_no || '',
+      ackNumber: invoice.ack_no || '',
+      customer: {
+        name: invoice.customer_name,
+        address: `${invoice.customer_address}, ${invoice.customer_state_name}`,
+        gstin: invoice.customer_gstin
+      },
+      items: details.map((detail: any) => ({
+        name: detail.item_name || 'Product',
+        hsnCode: detail.hsn_code,
+        quantity: Number(detail.qty),
+        unit: detail.unit || 'NOS',
+        rate: Number(detail.rate),
+        amount: Number(detail.taxable_amt),
+        gstRate: Number(detail.cgst_rate + detail.sgst_rate),
+        cgstAmount: Number(detail.cgst_amt),
+        sgstAmount: Number(detail.sgst_amt),
+        igstAmount: 0, // Not in current schema
+        totalAmount: Number(detail.total_amount)
+      })),
+      totals: {
+        totalAmount: Number(invoice.grand_total_taxable_amt || 0),
+        cgstAmount: Number(invoice.grand_total_cgst_amt || 0),
+        sgstAmount: Number(invoice.grand_total_sgst_amt || 0),
+        igstAmount: 0, // Not in current schema
+        netAmount: Number(invoice.grand_total_amt || 0),
+        amountInWords: numberToWords(Number(invoice.grand_total_amt || 0))
+      },
+      qrCode: '' // Not in current schema
     };
 
-    await RedisCache.set(cacheKey, result, 3600);
+    const pdfBytes = await generateInvoicePDF(invoiceData);
 
-    return NextResponse.json(result);
-  } catch (error) {
-    console.error('Invoices GET error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
-  }
-}
+    // Convert Uint8Array to Buffer for NextResponse
+    const pdfBuffer = Buffer.from(pdfBytes);
 
-export async function POST(request: NextRequest) {
-  try {
-    const token = getTokenFromRequest(request);
-    if (!token) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
-    const user = verifyToken(token);
-    if (!user || !hasPermission(user, 'SALES', 'write')) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
-
-    const body = await request.json();
-    const { customer_id, invoice_date, place_of_supply, items, submit_to_gst } = body;
-
-    // Calculate totals
-    let totalAmount = 0;
-    let cgstAmount = 0;
-    let sgstAmount = 0;
-    let igstAmount = 0;
-
-    const processedItems = items.map((item: any) => {
-      const amount = item.quantity * item.rate;
-      const gstAmount = (amount * item.gst_rate) / 100;
-      
-      // Determine if inter-state or intra-state
-      const isInterState = place_of_supply !== '19'; // Assuming seller state is 19 (WB)
-      
-      totalAmount += amount;
-      
-      if (isInterState) {
-        igstAmount += gstAmount;
-        return {
-          ...item,
-          amount,
-          cgst_amount: 0,
-          sgst_amount: 0,
-          igst_amount: gstAmount,
-          total_amount: amount + gstAmount
-        };
-      } else {
-        const halfGst = gstAmount / 2;
-        cgstAmount += halfGst;
-        sgstAmount += halfGst;
-        return {
-          ...item,
-          amount,
-          cgst_amount: halfGst,
-          sgst_amount: halfGst,
-          igst_amount: 0,
-          total_amount: amount + gstAmount
-        };
+    return new NextResponse(pdfBuffer, {
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="Invoice-${invoice.invoice_no}.pdf"`
       }
     });
-
-    const netAmount = totalAmount + cgstAmount + sgstAmount + igstAmount;
-
-    // Generate invoice number
-    const invoiceCount = await prisma.taxInvoice.count();
-    const invoiceNumber = `INV-${new Date().getFullYear()}-${(invoiceCount + 1).toString().padStart(4, '0')}`;
-
-    let irnData = null;
-
-    // Submit to GST if required
-    if (submit_to_gst) {
-      try {
-        const customer = await prisma.masterCustomer.findUnique({
-          where: { id: customer_id }
-        });
-
-        if (!customer) {
-          throw new Error('Customer not found');
-        }
-
-        const gstApi = new GSTEInvoiceAPI();
-        
-        const eInvoicePayload = buildEInvoicePayload({
-          invoiceNumber,
-          invoiceDate: invoice_date,
-          sellerGstin: process.env.GST_API_GSTIN!,
-          sellerName: 'Your Company Name',
-          sellerAddress: 'Your Company Address',
-          sellerCity: 'Bhātpāra',
-          sellerPincode: '743124',
-          buyerGstin: customer.customer_gstin,
-          buyerName: customer.customer_name,
-          buyerAddress: customer.customer_address,
-          buyerCity: customer.customer_city,
-          buyerPincode: customer.customer_pincode,
-          items: processedItems.map((item: any) => ({
-            name: item.item_name,
-            hsnCode: item.hsn_code,
-            quantity: item.quantity,
-            unit: item.unit,
-            rate: item.rate,
-            amount: item.amount,
-            gstRate: item.gst_rate,
-            gstAmount: item.cgst_amount + item.sgst_amount + item.igst_amount,
-            totalAmount: item.total_amount,
-            isService: false
-          })),
-          totalAmount,
-          gstAmount: cgstAmount + sgstAmount + igstAmount,
-          netAmount
-        });
-
-        irnData = await gstApi.generateEInvoice(eInvoicePayload);
-      } catch (gstError) {
-        console.error('GST submission error:', gstError);
-        // Continue without GST submission but log error
-      }
-    }
-
-    // Create invoice in database
-    const result = await prisma.$transaction(async (tx: typeof prisma) => {
-      const invoice = await tx.taxInvoice.create({
-        data: {
-          customer_id,
-          invoice_date: new Date(invoice_date),
-          invoice_number: invoiceNumber,
-          place_of_supply,
-          irn: irnData?.Irn,
-          ack_number: irnData?.AckNo?.toString(),
-          ack_date: irnData ? new Date(irnData.AckDt) : null,
-          qr_code: irnData?.SignedQRCode,
-          total_amount: totalAmount,
-          cgst_amount: cgstAmount,
-          sgst_amount: sgstAmount,
-          igst_amount: igstAmount,
-          net_amount: netAmount,
-          is_submitted: !!irnData
-        },
-        include: {
-          customer: true
-        }
-      });
-
-      // Create invoice details
-      await tx.taxInvoiceDetails.createMany({
-        data: processedItems.map((item: any) => ({
-          invoice_id: invoice.id,
-          ...item
-        }))
-      });
-
-      return invoice;
-    });
-
-    // Invalidate cache
-    await RedisCache.delPattern('invoices:*');
-
-    return NextResponse.json(result, { status: 201 });
   } catch (error) {
-    console.error('Invoice creation error:', error);
+    console.error('PDF generation error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

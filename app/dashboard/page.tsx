@@ -178,7 +178,7 @@ export default function DashboardPage() {
               <h3 className="text-lg font-medium text-gray-900 mb-4">Quick Actions</h3>
               <div className="space-y-3">
                 <button
-                  onClick={() => router.push('/invoices/new')}
+                  onClick={() => router.push('/invoices')}
                   className="w-full text-left px-4 py-3 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
                 >
                   <div className="flex items-center">
