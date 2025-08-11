@@ -1,0 +1,501 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model AssignPersonMaster {
+  id           Int    @id @default(autoincrement())
+  person_name  String @db.VarChar(255)
+  person_type  String @db.VarChar(100)
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  @@map("assign_person_master")
+}
+
+model Designation {
+  id             Int    @id @default(autoincrement())
+  designation    String @db.VarChar(255)
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  @@map("designation")
+}
+
+model GodownStock {
+  id                Int                  @id @default(autoincrement())
+  godown_id         Int
+  raw_material_id   Int?
+  finished_product_id Int?
+  quantity          Decimal              @db.Decimal(10, 2)
+  unit_id           Int
+  rate              Decimal              @db.Decimal(10, 2)
+  amount            Decimal              @db.Decimal(10, 2)
+  created_at        DateTime             @default(now())
+  updated_at        DateTime             @updatedAt
+
+  godown            MasterGodown         @relation(fields: [godown_id], references: [id])
+  rawMaterial       MasterRawMaterial?   @relation(fields: [raw_material_id], references: [id])
+  finishedProduct   MasterFinishedProduct? @relation(fields: [finished_product_id], references: [id])
+  unit              MasterRawMaterialUnit @relation(fields: [unit_id], references: [id])
+
+  @@map("godown_stock")
+}
+
+model MasterCustomer {
+  id                    Int    @id @default(autoincrement())
+  customer_name         String @db.VarChar(255)
+  customer_address      String @db.Text
+  customer_city         String @db.VarChar(100)
+  customer_state        String @db.VarChar(100)
+  customer_pincode      String @db.VarChar(10)
+  customer_phone        String @db.VarChar(15)
+  customer_email        String @db.VarChar(100)
+  customer_gstin        String @db.VarChar(15)
+  customer_pan          String @db.VarChar(10)
+  created_at            DateTime @default(now())
+  updated_at            DateTime @updatedAt
+
+  taxInvoices           TaxInvoice[]
+  receiveFromCustomer   ReceiveFromCustomer[]
+
+  @@map("master_customer")
+}
+
+model MasterFinishedProduct {
+  id                     Int    @id @default(autoincrement())
+  finished_product_name  String @db.VarChar(255)
+  finished_product_code  String @db.VarChar(100)
+  hsn_sac_code_id        Int
+  created_at             DateTime @default(now())
+  updated_at             DateTime @updatedAt
+
+  hsnSacCode             MasterHsnSacCode @relation(fields: [hsn_sac_code_id], references: [id])
+  godownStock            GodownStock[]
+
+  @@map("master_finished_product")
+}
+
+model MasterFinishedProductUnit {
+  id        Int    @id @default(autoincrement())
+  unit_name String @db.VarChar(100)
+  unit_code String @db.VarChar(20)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@map("master_finished_product_unit")
+}
+
+model MasterGodown {
+  id           Int    @id @default(autoincrement())
+  godown_name  String @db.VarChar(255)
+  godown_code  String @db.VarChar(100)
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  godownStock  GodownStock[]
+
+  @@map("master_godown")
+}
+
+model MasterHsnSacCode {
+  id          Int     @id @default(autoincrement())
+  code        String  @db.VarChar(20)
+  description String  @db.VarChar(500)
+  gst_rate    Decimal @db.Decimal(5, 2)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  rawMaterials      MasterRawMaterial[]
+  finishedProducts  MasterFinishedProduct[]
+
+  @@map("master_hsn_sac_code")
+}
+
+model MasterRawMaterial {
+  id                  Int    @id @default(autoincrement())
+  raw_material_name   String @db.VarChar(255)
+  raw_material_code   String @db.VarChar(100)
+  hsn_sac_code_id     Int
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  hsnSacCode          MasterHsnSacCode @relation(fields: [hsn_sac_code_id], references: [id])
+  godownStock         GodownStock[]
+  purchaseDetails     PurchasedItemDetails[]
+  stockoutDetails     RawMaterialStockoutDetails[]
+  returnDetails       RawMaterialReturnDetails[]
+
+  @@map("master_raw_material")
+}
+
+model MasterRawMaterialUnit {
+  id         Int    @id @default(autoincrement())
+  unit_name  String @db.VarChar(100)
+  unit_code  String @db.VarChar(20)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  godownStock         GodownStock[]
+  purchaseDetails     PurchasedItemDetails[]
+  stockoutDetails     RawMaterialStockoutDetails[]
+  returnDetails       RawMaterialReturnDetails[]
+
+  @@map("master_raw_material_unit")
+}
+
+model MasterTransactionMode {
+  id              Int    @id @default(autoincrement())
+  transaction_mode String @db.VarChar(100)
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  @@map("master_transaction_mode")
+}
+
+model MasterTransType {
+  id         Int    @id @default(autoincrement())
+  trans_type String @db.VarChar(100)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@map("master_trans_type")
+}
+
+model MasterUser {
+  id         Int    @id @default(autoincrement())
+  username   String @unique @db.VarChar(100)
+  password   String @db.VarChar(255)
+  full_name  String @db.VarChar(255)
+  email      String @db.VarChar(100)
+  phone      String @db.VarChar(15)
+  is_active  Boolean @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  departmentAccess MasterUserDepartmentAccess[]
+
+  @@map("master_user")
+}
+
+model MasterUserDepartment {
+  id              Int    @id @default(autoincrement())
+  department_name String @db.VarChar(100)
+  department_code String @db.VarChar(20)
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  userAccess      MasterUserDepartmentAccess[]
+
+  @@map("master_user_department")
+}
+
+model MasterUserDepartmentAccess {
+  id            Int    @id @default(autoincrement())
+  user_id       Int
+  department_id Int
+  can_read      Boolean @default(true)
+  can_write     Boolean @default(false)
+  can_delete    Boolean @default(false)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  user          MasterUser @relation(fields: [user_id], references: [id])
+  department    MasterUserDepartment @relation(fields: [department_id], references: [id])
+
+  @@map("master_user_department_access")
+}
+
+model MasterVendor {
+  id               Int    @id @default(autoincrement())
+  vendor_name      String @db.VarChar(255)
+  vendor_address   String @db.Text
+  vendor_city      String @db.VarChar(100)
+  vendor_state     String @db.VarChar(100)
+  vendor_pincode   String @db.VarChar(10)
+  vendor_phone     String @db.VarChar(15)
+  vendor_email     String @db.VarChar(100)
+  vendor_gstin     String @db.VarChar(15)
+  vendor_pan       String @db.VarChar(10)
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+
+  purchases        PurchasedItem[]
+  debitNotes       PurchaseDebitNote[]
+  payments         PaymentToVendor[]
+
+  @@map("master_vendor")
+}
+
+model PaymentToVendor {
+  id                 Int      @id @default(autoincrement())
+  vendor_id          Int
+  payment_date       DateTime
+  amount             Decimal  @db.Decimal(10, 2)
+  payment_mode       String   @db.VarChar(100)
+  reference_number   String   @db.VarChar(100)
+  remarks            String?  @db.Text
+  created_at         DateTime @default(now())
+  updated_at         DateTime @updatedAt
+
+  vendor             MasterVendor @relation(fields: [vendor_id], references: [id])
+
+  @@map("payment_to_vendor")
+}
+
+model PurchasedItem {
+  id               Int      @id @default(autoincrement())
+  vendor_id        Int
+  purchase_date    DateTime
+  invoice_number   String   @db.VarChar(100)
+  total_amount     Decimal  @db.Decimal(10, 2)
+  gst_amount       Decimal  @db.Decimal(10, 2)
+  net_amount       Decimal  @db.Decimal(10, 2)
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+
+  vendor           MasterVendor @relation(fields: [vendor_id], references: [id])
+  details          PurchasedItemDetails[]
+
+  @@map("purchased_item")
+}
+
+model PurchasedItemDetails {
+  id              Int     @id @default(autoincrement())
+  purchased_id    Int
+  raw_material_id Int
+  quantity        Decimal @db.Decimal(10, 2)
+  unit_id         Int
+  rate            Decimal @db.Decimal(10, 2)
+  amount          Decimal @db.Decimal(10, 2)
+  gst_rate        Decimal @db.Decimal(5, 2)
+  gst_amount      Decimal @db.Decimal(10, 2)
+  total_amount    Decimal @db.Decimal(10, 2)
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  purchase        PurchasedItem @relation(fields: [purchased_id], references: [id])
+  rawMaterial     MasterRawMaterial @relation(fields: [raw_material_id], references: [id])
+  unit            MasterRawMaterialUnit @relation(fields: [unit_id], references: [id])
+
+  @@map("purchased_item_details")
+}
+
+model PurchaseDebitNote {
+  id               Int      @id @default(autoincrement())
+  vendor_id        Int
+  debit_note_date  DateTime
+  debit_note_number String  @db.VarChar(100)
+  original_invoice String  @db.VarChar(100)
+  reason           String  @db.Text
+  total_amount     Decimal @db.Decimal(10, 2)
+  gst_amount       Decimal @db.Decimal(10, 2)
+  net_amount       Decimal @db.Decimal(10, 2)
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+
+  vendor           MasterVendor @relation(fields: [vendor_id], references: [id])
+  details          PurchaseDebitNoteDetails[]
+
+  @@map("purchase_debit_note")
+}
+
+model PurchaseDebitNoteDetails {
+  id              Int     @id @default(autoincrement())
+  debit_note_id   Int
+  raw_material_id Int
+  quantity        Decimal @db.Decimal(10, 2)
+  unit_id         Int
+  rate            Decimal @db.Decimal(10, 2)
+  amount          Decimal @db.Decimal(10, 2)
+  gst_rate        Decimal @db.Decimal(5, 2)
+  gst_amount      Decimal @db.Decimal(10, 2)
+  total_amount    Decimal @db.Decimal(10, 2)
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  debitNote       PurchaseDebitNote @relation(fields: [debit_note_id], references: [id])
+
+  @@map("purchase_debit_note_details")
+}
+
+model RawMaterialReturn {
+  id             Int      @id @default(autoincrement())
+  return_date    DateTime
+  return_number  String   @db.VarChar(100)
+  godown_id      Int
+  reason         String   @db.Text
+  total_amount   Decimal  @db.Decimal(10, 2)
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  details        RawMaterialReturnDetails[]
+
+  @@map("raw_material_return")
+}
+
+model RawMaterialReturnDetails {
+  id              Int     @id @default(autoincrement())
+  return_id       Int
+  raw_material_id Int
+  quantity        Decimal @db.Decimal(10, 2)
+  unit_id         Int
+  rate            Decimal @db.Decimal(10, 2)
+  amount          Decimal @db.Decimal(10, 2)
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  return          RawMaterialReturn @relation(fields: [return_id], references: [id])
+  rawMaterial     MasterRawMaterial @relation(fields: [raw_material_id], references: [id])
+  unit            MasterRawMaterialUnit @relation(fields: [unit_id], references: [id])
+
+  @@map("raw_material_return_details")
+}
+
+model RawMaterialStockout {
+  id             Int      @id @default(autoincrement())
+  stockout_date  DateTime
+  stockout_number String  @db.VarChar(100)
+  godown_id      Int
+  purpose        String   @db.VarChar(255)
+  total_amount   Decimal  @db.Decimal(10, 2)
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  details        RawMaterialStockoutDetails[]
+
+  @@map("raw_material_stockout")
+}
+
+model RawMaterialStockoutDetails {
+  id              Int     @id @default(autoincrement())
+  stockout_id     Int
+  raw_material_id Int
+  quantity        Decimal @db.Decimal(10, 2)
+  unit_id         Int
+  rate            Decimal @db.Decimal(10, 2)
+  amount          Decimal @db.Decimal(10, 2)
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  stockout        RawMaterialStockout @relation(fields: [stockout_id], references: [id])
+  rawMaterial     MasterRawMaterial @relation(fields: [raw_material_id], references: [id])
+  unit            MasterRawMaterialUnit @relation(fields: [unit_id], references: [id])
+
+  @@map("raw_material_stockout_details")
+}
+
+model ReceiveFromCustomer {
+  id                 Int      @id @default(autoincrement())
+  customer_id        Int
+  receipt_date       DateTime
+  amount             Decimal  @db.Decimal(10, 2)
+  payment_mode       String   @db.VarChar(100)
+  reference_number   String   @db.VarChar(100)
+  remarks            String?  @db.Text
+  created_at         DateTime @default(now())
+  updated_at         DateTime @updatedAt
+
+  customer           MasterCustomer @relation(fields: [customer_id], references: [id])
+
+  @@map("receive_from_customer")
+}
+
+model TaxInvoice {
+  id                 Int      @id @default(autoincrement())
+  customer_id        Int
+  invoice_date       DateTime
+  invoice_number     String   @db.VarChar(100)
+  place_of_supply    String   @db.VarChar(100)
+  irn                String?  @db.VarChar(100)
+  ack_number         String?  @db.VarChar(100)
+  ack_date           DateTime?
+  qr_code            String?  @db.Text
+  total_amount       Decimal  @db.Decimal(10, 2)
+  cgst_amount        Decimal  @db.Decimal(10, 2)
+  sgst_amount        Decimal  @db.Decimal(10, 2)
+  igst_amount        Decimal  @db.Decimal(10, 2)
+  net_amount         Decimal  @db.Decimal(10, 2)
+  is_submitted       Boolean  @default(false)
+  created_at         DateTime @default(now())
+  updated_at         DateTime @updatedAt
+
+  customer           MasterCustomer @relation(fields: [customer_id], references: [id])
+  details            TaxInvoiceDetails[]
+  creditNotes        TaxInvoiceCreditNote[]
+
+  @@map("tax_invoice")
+}
+
+model TaxInvoiceDetails {
+  id              Int     @id @default(autoincrement())
+  invoice_id      Int
+  item_name       String  @db.VarChar(255)
+  hsn_code        String  @db.VarChar(20)
+  quantity        Decimal @db.Decimal(10, 2)
+  unit            String  @db.VarChar(50)
+  rate            Decimal @db.Decimal(10, 2)
+  amount          Decimal @db.Decimal(10, 2)
+  gst_rate        Decimal @db.Decimal(5, 2)
+  cgst_amount     Decimal @db.Decimal(10, 2)
+  sgst_amount     Decimal @db.Decimal(10, 2)
+  igst_amount     Decimal @db.Decimal(10, 2)
+  total_amount    Decimal @db.Decimal(10, 2)
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  invoice         TaxInvoice @relation(fields: [invoice_id], references: [id])
+
+  @@map("tax_invoice_details")
+}
+
+model TaxInvoiceCreditNote {
+  id                   Int      @id @default(autoincrement())
+  invoice_id           Int
+  credit_note_date     DateTime
+  credit_note_number   String   @db.VarChar(100)
+  reason               String   @db.Text
+  irn                  String?  @db.VarChar(100)
+  ack_number           String?  @db.VarChar(100)
+  ack_date             DateTime?
+  qr_code              String?  @db.Text
+  total_amount         Decimal  @db.Decimal(10, 2)
+  cgst_amount          Decimal  @db.Decimal(10, 2)
+  sgst_amount          Decimal  @db.Decimal(10, 2)
+  igst_amount          Decimal  @db.Decimal(10, 2)
+  net_amount           Decimal  @db.Decimal(10, 2)
+  is_submitted         Boolean  @default(false)
+  created_at           DateTime @default(now())
+  updated_at           DateTime @updatedAt
+
+  invoice              TaxInvoice @relation(fields: [invoice_id], references: [id])
+  details              TaxInvoiceCreditNoteDetails[]
+
+  @@map("tax_invoice_credit_note")
+}
+
+model TaxInvoiceCreditNoteDetails {
+  id              Int     @id @default(autoincrement())
+  credit_note_id  Int
+  item_name       String  @db.VarChar(255)
+  hsn_code        String  @db.VarChar(20)
+  quantity        Decimal @db.Decimal(10, 2)
+  unit            String  @db.VarChar(50)
+  rate            Decimal @db.Decimal(10, 2)
+  amount          Decimal @db.Decimal(10, 2)
+  gst_rate        Decimal @db.Decimal(5, 2)
+  cgst_amount     Decimal @db.Decimal(10, 2)
+  sgst_amount     Decimal @db.Decimal(10, 2)
+  igst_amount     Decimal @db.Decimal(10, 2)
+  total_amount    Decimal @db.Decimal(10, 2)
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  creditNote      TaxInvoiceCreditNote @relation(fields: [credit_note_id], references: [id])
+
+  @@map("tax_invoice_credit_note_details")
+}
