@@ -7,18 +7,23 @@ import { Database } from '@/lib/db';
 import { RedisCache } from '@/lib/redis';
 import { verifyToken, getTokenFromRequest, hasPermission } from '@/lib/auth';
 
-
 const MASTER_TABLES = {
   'raw-materials': {
     table: 'master_raw_material',
     idField: 'raw_material_id',
-    fields: ['raw_material_name', 'raw_material_unit_id', 'raw_material_desc'],
-    joins: 'LEFT JOIN master_hsn_sac_code h ON m.hsn_sac_id = h.hsn_sac_id'
+    fields: ['raw_material_name', 'raw_material_unit_id', 'raw_material_desc', 'hsn_sac_id'],
+    joins: 'LEFT JOIN master_hsn_sac_code h ON m.hsn_sac_id = h.hsn_sac_id LEFT JOIN master_raw_material_unit u ON m.raw_material_unit_id = u.raw_material_unit_id'
   },
   'customers': {
     table: 'master_customer',
     idField: 'customer_id',
-    fields: ['customer_company_name', 'customer_name', 'customer_mob', 'customer_address', 'customer_state_name', 'customer_state_code', 'customer_gst_in'],
+    fields: [
+      'customer_company_name', 'customer_name', 'customer_mob', 'customer_address', 
+      'customer_state_name', 'customer_state_code', 'customer_gst_in',
+      'customer_legal_name', 'customer_trade_name', 'customer_pin_code', 
+      'customer_phone', 'customer_email', 'customer_type', 'customer_pan', 
+      'is_sez', 'is_export'
+    ],
     joins: ''
   },
   'vendors': {
@@ -56,6 +61,12 @@ const MASTER_TABLES = {
     idField: 'user_id',
     fields: ['role', 'name_display', 'address', 'contact_no', 'designation', 'pan_no', 'date_of_join', 'salary', 'user_email', 'user_name', 'status', 'verify_otp'],
     joins: ''
+  },
+  'gst-settings': {
+    table: 'gst_settings',
+    idField: 'setting_id',
+    fields: ['setting_key', 'setting_value', 'description', 'is_active'],
+    joins: ''
   }
 } as const;
 
@@ -81,11 +92,17 @@ export async function GET(
     }
 
     // Query parameters
-  const urlObj = new URL(request.url);
-  const searchParams = urlObj.searchParams;
+    const urlObj = new URL(request.url);
+    const searchParams = urlObj.searchParams;
     const page = parseInt(searchParams.get('page') || '1');
     const limit = parseInt(searchParams.get('limit') || '50');
     const search = searchParams.get('search') || '';
+
+    // Validate master type
+    const masterConfig = MASTER_TABLES[params.type as keyof typeof MASTER_TABLES];
+    if (!masterConfig) {
+      return NextResponse.json({ error: 'Invalid master type' }, { status: 400 });
+    }
 
     // Check cache
     const cacheKey = RedisCache.getCacheKey('masters', params.type, page, limit, search);
@@ -94,24 +111,30 @@ export async function GET(
       return NextResponse.json(cachedData);
     }
 
-    // Validate master type
-    const masterConfig = MASTER_TABLES[params.type as keyof typeof MASTER_TABLES];
-    if (!masterConfig) {
-      return NextResponse.json({ error: 'Invalid master type' }, { status: 400 });
+    // Build query with proper joins for new schema
+    let baseQuery;
+    if (masterConfig.joins) {
+      if (params.type === 'raw-materials') {
+        baseQuery = `SELECT m.*, h.hsn_sac_code, h.gst_rate, u.raw_material_unit_name FROM ${masterConfig.table} m ${masterConfig.joins}`;
+      } else if (params.type === 'finished-products') {
+        baseQuery = `SELECT m.*, h.hsn_sac_code, h.gst_rate FROM ${masterConfig.table} m ${masterConfig.joins}`;
+      } else {
+        baseQuery = `SELECT m.* FROM ${masterConfig.table} m ${masterConfig.joins}`;
+      }
+    } else {
+      baseQuery = `SELECT m.* FROM ${masterConfig.table} m`;
     }
 
-    // Build query
-    const baseQuery = `SELECT m.* FROM ${masterConfig.table} m ${masterConfig.joins || ''}`;
     const searchCond = getSearchCondition(params.type, search);
     const { condition, params: searchParamsArr } = searchCond;
-    const paginationQuery = Database.buildPaginationQuery(
+    
+    const { sql, countSql, params: dbParams } = Database.buildPaginationQuery(
       baseQuery,
       page,
       limit,
       condition,
       searchParamsArr
     );
-    const { sql, countSql, params: dbParams } = paginationQuery;
 
     // Execute queries
     const [data, totalResult] = await Promise.all([
@@ -130,7 +153,7 @@ export async function GET(
       },
     };
 
-    // Cache result
+    // Cache result for 1 hour
     await RedisCache.set(cacheKey, result, 3600);
 
     return NextResponse.json(result);
@@ -177,10 +200,34 @@ export async function POST(
     const insertedId = await Database.insert(insertSql, values);
 
     // Fetch the created record
-    const createdRecord = await Database.queryFirst(
-      `SELECT * FROM ${masterConfig.table} WHERE ${masterConfig.idField} = ?`,
-      [insertedId]
-    );
+    let createdRecord;
+    if (masterConfig.joins) {
+      if (params.type === 'raw-materials') {
+        createdRecord = await Database.queryFirst(`
+          SELECT m.*, h.hsn_sac_code, h.gst_rate, u.raw_material_unit_name 
+          FROM ${masterConfig.table} m 
+          ${masterConfig.joins}
+          WHERE m.${masterConfig.idField} = ?
+        `, [insertedId]);
+      } else if (params.type === 'finished-products') {
+        createdRecord = await Database.queryFirst(`
+          SELECT m.*, h.hsn_sac_code, h.gst_rate 
+          FROM ${masterConfig.table} m 
+          ${masterConfig.joins}
+          WHERE m.${masterConfig.idField} = ?
+        `, [insertedId]);
+      } else {
+        createdRecord = await Database.queryFirst(
+          `SELECT * FROM ${masterConfig.table} WHERE ${masterConfig.idField} = ?`,
+          [insertedId]
+        );
+      }
+    } else {
+      createdRecord = await Database.queryFirst(
+        `SELECT * FROM ${masterConfig.table} WHERE ${masterConfig.idField} = ?`,
+        [insertedId]
+      );
+    }
 
     // Invalidate cache
     await RedisCache.delPattern(`masters:${params.type}:*`);
@@ -242,10 +289,34 @@ export async function PUT(
     }
 
     // Fetch the updated record
-    const updatedRecord = await Database.queryFirst(
-      `SELECT * FROM ${masterConfig.table} WHERE ${masterConfig.idField} = ?`,
-      [id]
-    );
+    let updatedRecord;
+    if (masterConfig.joins) {
+      if (params.type === 'raw-materials') {
+        updatedRecord = await Database.queryFirst(`
+          SELECT m.*, h.hsn_sac_code, h.gst_rate, u.raw_material_unit_name 
+          FROM ${masterConfig.table} m 
+          ${masterConfig.joins}
+          WHERE m.${masterConfig.idField} = ?
+        `, [id]);
+      } else if (params.type === 'finished-products') {
+        updatedRecord = await Database.queryFirst(`
+          SELECT m.*, h.hsn_sac_code, h.gst_rate 
+          FROM ${masterConfig.table} m 
+          ${masterConfig.joins}
+          WHERE m.${masterConfig.idField} = ?
+        `, [id]);
+      } else {
+        updatedRecord = await Database.queryFirst(
+          `SELECT * FROM ${masterConfig.table} WHERE ${masterConfig.idField} = ?`,
+          [id]
+        );
+      }
+    } else {
+      updatedRecord = await Database.queryFirst(
+        `SELECT * FROM ${masterConfig.table} WHERE ${masterConfig.idField} = ?`,
+        [id]
+      );
+    }
 
     // Invalidate cache
     await RedisCache.delPattern(`masters:${params.type}:*`);
@@ -303,17 +374,21 @@ export async function DELETE(
 }
 
 function getSearchCondition(type: string, search: string): SearchCondition {
+  if (!search.trim()) {
+    return { condition: '', params: [] };
+  }
+  
   const searchPattern = `%${search}%`;
   switch (type) {
     case 'raw-materials':
       return {
-        condition: '(m.raw_material_name LIKE ? OR m.raw_material_desc LIKE ?)',
-        params: [searchPattern, searchPattern],
+        condition: '(m.raw_material_name LIKE ? OR m.raw_material_desc LIKE ? OR h.hsn_sac_code LIKE ?)',
+        params: [searchPattern, searchPattern, searchPattern],
       };
     case 'customers':
       return {
-        condition: '(m.customer_name LIKE ? OR m.customer_company_name LIKE ? OR m.customer_gst_in LIKE ?)',
-        params: [searchPattern, searchPattern, searchPattern],
+        condition: '(m.customer_name LIKE ? OR m.customer_company_name LIKE ? OR m.customer_gst_in LIKE ? OR m.customer_legal_name LIKE ?)',
+        params: [searchPattern, searchPattern, searchPattern, searchPattern],
       };
     case 'vendors':
       return {
@@ -333,6 +408,11 @@ function getSearchCondition(type: string, search: string): SearchCondition {
     case 'users':
       return {
         condition: '(m.user_name LIKE ? OR m.name_display LIKE ? OR m.user_email LIKE ?)',
+        params: [searchPattern, searchPattern, searchPattern],
+      };
+    case 'gst-settings':
+      return {
+        condition: '(m.setting_key LIKE ? OR m.setting_value LIKE ? OR m.description LIKE ?)',
         params: [searchPattern, searchPattern, searchPattern],
       };
     default:

@@ -131,39 +131,60 @@ export default function InvoicesPage() {
     }
   ];
 
-  const invoiceFormFields: FormField[] = [
+ const invoiceFormFields: FormField[] = [
+  {
+    name: 'customer_id',
+    label: 'Customer Company',
+    type: 'select',
+    required: true,
+    // Fixed: Use customer_company_name with fallback to customer_name
+    options: customers.map(c => ({ 
+      value: c.customer_id.toString(), 
+      label: c.customer_company_name || c.customer_name || `ID: ${c.customer_id}`
+    }))
+  },
+  {
+    name: 'invoice_date',
+    label: 'Invoice Date',
+    type: 'date',
+    required: true,
+    defaultValue: new Date().toISOString().split('T')[0]
+  },
+  {
+    name: 'place_of_supply',
+    label: 'Place of Supply (State Code)',
+    type: 'text',
+    required: true,
+    placeholder: 'e.g., 19 for West Bengal'
+  },
+  {
+    name: 'submit_to_gst',
+    label: 'Submit to GST',
+    type: 'select',
+    options: [
+      { value: 'false', label: 'No - Save as Draft' },
+      { value: 'true', label: 'Yes - Submit to GST Portal' }
+    ],
+    defaultValue: 'false'
+  }
+];
+
+  // Alternative approach: Show both company name and customer name for better clarity
+  const invoiceFormFieldsAlternative: FormField[] = [
     {
       name: 'customer_id',
       label: 'Customer',
       type: 'select',
       required: true,
-      options: customers.map(c => ({ value: c.customer_id.toString(), label: c.customer_name }))
+      // Show both company name and customer name for better identification
+      options: customers.map(c => ({
+        value: c.customer_id.toString(),
+        label: c.customer_company_name
+          ? `${c.customer_company_name} (${c.customer_name})`
+          : c.customer_name || `Customer ID: ${c.customer_id}`
+      }))
     },
-    {
-      name: 'invoice_date',
-      label: 'Invoice Date',
-      type: 'date',
-      required: true,
-      defaultValue: new Date().toISOString().split('T')[0]
-    },
-    {
-      name: 'place_of_supply',
-      label: 'Place of Supply (State Code)',
-      type: 'text',
-      required: true,
-      placeholder: 'e.g., 19 for West Bengal'
-    },
-    {
-      name: 'submit_to_gst',
-      label: 'Submit to GST',
-      type: 'select',
-      options: [
-        { value: 'false', label: 'No - Save as Draft' },
-        { value: 'true', label: 'Yes - Submit to GST Portal' }
-      ],
-      defaultValue: 'false'
-    }
-  ];
+  ]
 
   const [invoiceItems, setInvoiceItems] = useState([
     {
@@ -347,7 +368,14 @@ export default function InvoicesPage() {
                                 <label className="block text-sm text-gray-700 mb-1">HSN Code</label>
                                 <select
                                   value={item.hsn_code}
-                                  onChange={(e) => updateInvoiceItem(index, 'hsn_code', e.target.value)}
+                                  onChange={(e) => {
+                                    updateInvoiceItem(index, 'hsn_code', e.target.value);
+                                    // Auto-update GST rate when HSN is selected
+                                    const selectedHsn = hsnCodes.find(hsn => hsn.hsn_sac_code === e.target.value);
+                                    if (selectedHsn) {
+                                      updateInvoiceItem(index, 'gst_rate', Number(selectedHsn.gst_rate));
+                                    }
+                                  }}
                                   className="w-full px-2 py-1 border border-gray-300 rounded text-sm"
                                 >
                                   <option value="">Select HSN</option>
