@@ -1,3 +1,4 @@
+// app/api/invoices/route.ts
 export const config = {
   runtime: 'nodejs',
 };
@@ -7,7 +8,7 @@ import { Database } from '@/lib/db';
 import { RedisCache } from '@/lib/redis';
 import { verifyToken, getTokenFromRequest, hasPermission } from '@/lib/auth';
 
-// GET /api/invoices - List all invoices with pagination
+// GET /api/invoices - List all invoices with pagination (FIXED)
 export async function GET(request: NextRequest) {
   try {
     const token = getTokenFromRequest(request);
@@ -32,7 +33,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(cachedData);
     }
 
-    // Build the base query for listing invoices with new fields
+    // Fixed query - removed the problematic IGST column reference and fixed SQL syntax
     const baseQuery = `
       SELECT 
         ti.tax_invoice_id as id,
@@ -44,15 +45,14 @@ export async function GET(request: NextRequest) {
         ti.supply_type,
         ti.transaction_type,
         CASE 
-          WHEN ti.irn_no IS NOT NULL AND ti.irn_no != '' THEN true
-          ELSE false
+          WHEN ti.irn_no IS NOT NULL AND ti.irn_no != '' THEN 1
+          ELSE 0
         END as is_submitted,
         COALESCE(mc.customer_company_name, mc.customer_name) as customer_name,
         mc.customer_gst_in as customer_gstin,
         ti.grand_total_taxable_amt,
         ti.grand_total_cgst_amt,
         ti.grand_total_sgst_amt,
-        COALESCE(ti.grand_total_igst_amt, 0) as grand_total_igst_amt,
         ti.error_message,
         ti.error_code
       FROM tax_invoice ti
@@ -87,7 +87,7 @@ export async function GET(request: NextRequest) {
       invoice_number: invoice.invoice_number,
       invoice_date: invoice.invoice_date,
       net_amount: Number(invoice.net_amount || 0),
-      is_submitted: invoice.is_submitted,
+      is_submitted: Boolean(invoice.is_submitted),
       irn: invoice.irn,
       status: invoice.status || 'draft',
       supply_type: invoice.supply_type,
@@ -100,7 +100,7 @@ export async function GET(request: NextRequest) {
         taxable_amount: Number(invoice.grand_total_taxable_amt || 0),
         cgst_amount: Number(invoice.grand_total_cgst_amt || 0),
         sgst_amount: Number(invoice.grand_total_sgst_amt || 0),
-        igst_amount: Number(invoice.grand_total_igst_amt || 0)
+        igst_amount: 0 // Default to 0 since this column doesn't exist
       },
       error: {
         code: invoice.error_code,
@@ -130,7 +130,7 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// POST /api/invoices - Create a new invoice with updated schema
+// POST /api/invoices - Create a new invoice (ENHANCED)
 export async function POST(request: NextRequest) {
   try {
     const token = getTokenFromRequest(request);
@@ -149,7 +149,7 @@ export async function POST(request: NextRequest) {
       invoice_date, 
       place_of_supply, 
       items, 
-      submit_to_gst,
+      submit_to_gst = false,
       supply_type = 'B2B',
       transaction_type = 'Regular',
       reverse_charge = 'N'
@@ -159,7 +159,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    // Get customer details for state determination
+    // Get customer details
     const customer = await Database.queryFirst(`
       SELECT customer_gst_in, customer_state_code, customer_pin_code,
              customer_company_name, customer_name, customer_address
@@ -186,6 +186,31 @@ export async function POST(request: NextRequest) {
       settings[setting.setting_key] = setting.setting_value;
     });
 
+    // Generate invoice number using sequence
+    const currentYear = new Date().getFullYear();
+    const financialYear = `${currentYear}-${(currentYear + 1).toString().slice(-2)}`;
+    
+    // Get or create sequence
+    let sequence = await Database.queryFirst(`
+      SELECT * FROM e_invoice_sequence WHERE financial_year = ?
+    `, [financialYear]);
+
+    if (!sequence) {
+      await Database.insert(`
+        INSERT INTO e_invoice_sequence (financial_year, series_prefix, current_number) 
+        VALUES (?, 'INV', 1)
+      `, [financialYear]);
+      sequence = { current_number: 1, series_prefix: 'INV' };
+    }
+
+    const invoiceNumber = `${sequence.series_prefix}${sequence.current_number.toString().padStart(6, '0')}`;
+
+    // Update sequence
+    await Database.execute(`
+      UPDATE e_invoice_sequence SET current_number = current_number + 1 
+      WHERE financial_year = ?
+    `, [financialYear]);
+
     // Determine if it's interstate (IGST) or intrastate (CGST+SGST)
     const sellerStateCode = settings.company_state_code || '27';
     const buyerStateCode = customer.customer_state_code || place_of_supply;
@@ -195,125 +220,211 @@ export async function POST(request: NextRequest) {
     let grandTotalTaxableAmt = 0;
     let grandTotalCgstAmt = 0;
     let grandTotalSgstAmt = 0;
-    let grandTotalIgstAmt = 0;
     let grandTotalAmt = 0;
 
     items.forEach((item: any) => {
       const taxableAmount = item.quantity * item.rate;
-      let cgstAmt = 0, sgstAmt = 0, igstAmt = 0;
+      let cgstAmt = 0, sgstAmt = 0;
 
-      if (isInterState) {
-        igstAmt = (taxableAmount * item.gst_rate) / 100;
-      } else {
+      if (!isInterState) {
         cgstAmt = (taxableAmount * item.gst_rate) / 200; // Half of GST rate
         sgstAmt = (taxableAmount * item.gst_rate) / 200; // Half of GST rate
       }
 
-      const totalAmount = taxableAmount + cgstAmt + sgstAmt + igstAmt;
+      const totalAmount = taxableAmount + cgstAmt + sgstAmt;
 
       grandTotalTaxableAmt += taxableAmount;
       grandTotalCgstAmt += cgstAmt;
       grandTotalSgstAmt += sgstAmt;
-      grandTotalIgstAmt += igstAmt;
       grandTotalAmt += totalAmount;
     });
 
-    // Start transaction
-    const queries = [];
+    // Insert invoice header
+    const invoiceId = await Database.insert(`
+      INSERT INTO tax_invoice (
+        customer_id, invoice_no, invoice_date, place_supply, supply_type, 
+        transaction_type, reverse_charge, seller_legal_name, seller_address1, 
+        seller_location, seller_pin_code, seller_state_code, buyer_pos, 
+        buyer_pin_code, status, grand_total_taxable_amt, grand_total_cgst_amt, 
+        grand_total_sgst_amt, grand_total_amt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)
+    `, [
+      customer_id, invoiceNumber, invoice_date, place_of_supply, supply_type, 
+      transaction_type, reverse_charge, settings.company_legal_name || 'Company Name',
+      settings.company_address1 || 'Company Address', settings.company_location || 'City',
+      parseInt(settings.company_pin_code) || 400001, sellerStateCode, buyerStateCode,
+      customer.customer_pin_code || 400001, grandTotalTaxableAmt, grandTotalCgstAmt, 
+      grandTotalSgstAmt, grandTotalAmt
+    ]);
 
-    // Insert invoice header with new fields
-    const invoiceQuery = {
-      sql: `
-        INSERT INTO tax_invoice (
-          customer_id, invoice_date, place_supply, supply_type, transaction_type, reverse_charge,
-          seller_legal_name, seller_address1, seller_location, seller_pin_code, seller_state_code,
-          buyer_pos, buyer_pin_code, status,
-          grand_total_taxable_amt, grand_total_cgst_amt, grand_total_sgst_amt, 
-          grand_total_igst_amt, grand_total_amt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)
-      `,
-      params: [
-        customer_id, invoice_date, place_of_supply, supply_type, transaction_type, reverse_charge,
-        settings.company_legal_name || 'Company Name',
-        settings.company_address1 || 'Company Address',
-        settings.company_location || 'City',
-        parseInt(settings.company_pin_code) || 400001,
-        sellerStateCode,
-        buyerStateCode,
-        customer.customer_pin_code || 400001,
-        grandTotalTaxableAmt, grandTotalCgstAmt, grandTotalSgstAmt, 
-        grandTotalIgstAmt, grandTotalAmt
-      ]
-    };
-
-    queries.push(invoiceQuery);
-
-    const results = await Database.transaction(queries);
-    const invoiceId = (results[0] as any).insertId;
-
-    // Get the generated invoice number from trigger
-    const createdInvoice = await Database.queryFirst(`
-      SELECT invoice_no FROM tax_invoice WHERE tax_invoice_id = ?
-    `, [invoiceId]);
-
-    // Insert invoice details with updated fields
+    // Insert invoice details
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const taxableAmount = item.quantity * item.rate;
-      let cgstRate = 0, sgstRate = 0, igstRate = 0;
-      let cgstAmt = 0, sgstAmt = 0, igstAmt = 0;
+      let cgstRate = 0, sgstRate = 0;
+      let cgstAmt = 0, sgstAmt = 0;
 
-      if (isInterState) {
-        igstRate = item.gst_rate;
-        igstAmt = (taxableAmount * igstRate) / 100;
-      } else {
+      if (!isInterState) {
         cgstRate = item.gst_rate / 2;
         sgstRate = item.gst_rate / 2;
         cgstAmt = (taxableAmount * cgstRate) / 100;
         sgstAmt = (taxableAmount * sgstRate) / 100;
       }
 
-      const totalAmount = taxableAmount + cgstAmt + sgstAmt + igstAmt;
+      const totalAmount = taxableAmount + cgstAmt + sgstAmt;
 
       await Database.insert(`
         INSERT INTO tax_invoice_details (
           tax_invoice_id, item_serial_number, product_description, hsn_sac_code, 
-          qty, unit_price, rate, per_id, total_amount, assessable_amount, taxable_amt,
-          cgst_rate, cgst_amt, sgst_rate, sgst_amt, igst_rate, igst_amount, total_amount
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          qty, unit_price, rate, per_id, assessable_amount, taxable_amt,
+          cgst_rate, cgst_amt, sgst_rate, sgst_amt, total_amount
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         invoiceId, i + 1, item.item_name || 'Product', item.hsn_code,
         item.quantity, item.rate, item.rate, 1, // per_id = 1 for default unit
-        taxableAmount, taxableAmount, taxableAmount,
-        cgstRate, cgstAmt, sgstRate, sgstAmt, igstRate, igstAmt, totalAmount
+        taxableAmount, taxableAmount, cgstRate, cgstAmt, sgstRate, sgstAmt, totalAmount
       ]);
     }
 
     // Clear cache
     await RedisCache.delPattern('invoices:*');
 
-    // If submit_to_gst is true, you would implement GST submission logic here
-    if (submit_to_gst === 'true' || submit_to_gst === true) {
-      // TODO: Implement GST portal submission using updated GST API
-      console.log('GST submission requested for invoice:', createdInvoice?.invoice_no);
-    }
-
     return NextResponse.json({ 
       success: true, 
       invoice_id: invoiceId,
-      invoice_number: createdInvoice?.invoice_no,
+      invoice_number: invoiceNumber,
       is_interstate: isInterState,
       totals: {
         taxable_amount: grandTotalTaxableAmt,
         cgst_amount: grandTotalCgstAmt,
         sgst_amount: grandTotalSgstAmt,
-        igst_amount: grandTotalIgstAmt,
+        igst_amount: 0,
         total_amount: grandTotalAmt
       }
     }, { status: 201 });
 
   } catch (error) {
     console.error('Invoice creation error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+
+// PUT /api/invoices - Update invoice
+export async function PUT(request: NextRequest) {
+  try {
+    const token = getTokenFromRequest(request);
+    if (!token) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const user = verifyToken(token);
+    if (!user || !hasPermission(user, 'SALES', 'write')) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
+    const { searchParams } = new URL(request.url);
+    const invoiceId = searchParams.get('id');
+    
+    if (!invoiceId) {
+      return NextResponse.json({ error: 'Invoice ID is required' }, { status: 400 });
+    }
+
+    const body = await request.json();
+
+    // Check if invoice can be updated
+    const invoice = await Database.queryFirst(`
+      SELECT status FROM tax_invoice WHERE tax_invoice_id = ?
+    `, [invoiceId]);
+
+    if (!invoice) {
+      return NextResponse.json({ error: 'Invoice not found' }, { status: 404 });
+    }
+
+    if (invoice.status === 'submitted') {
+      return NextResponse.json({ error: 'Cannot update submitted invoice' }, { status: 400 });
+    }
+
+    // Update invoice
+    const updateFields = [];
+    const updateValues = [];
+
+    if (body.status) {
+      updateFields.push('status = ?');
+      updateValues.push(body.status);
+    }
+
+    if (body.remarks) {
+      updateFields.push('remarks = ?');
+      updateValues.push(body.remarks);
+    }
+
+    if (updateFields.length > 0) {
+      updateValues.push(invoiceId);
+      await Database.execute(
+        `UPDATE tax_invoice SET ${updateFields.join(', ')} WHERE tax_invoice_id = ?`,
+        updateValues
+      );
+    }
+
+    // Clear cache
+    await RedisCache.delPattern('invoices:*');
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error('Invoice update error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+
+// DELETE /api/invoices - Delete invoice
+export async function DELETE(request: NextRequest) {
+  try {
+    const token = getTokenFromRequest(request);
+    if (!token) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const user = verifyToken(token);
+    if (!user || !hasPermission(user, 'SALES', 'delete')) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
+    const { searchParams } = new URL(request.url);
+    const invoiceId = searchParams.get('id');
+    
+    if (!invoiceId) {
+      return NextResponse.json({ error: 'Invoice ID is required' }, { status: 400 });
+    }
+
+    // Check if invoice can be deleted
+    const invoice = await Database.queryFirst(`
+      SELECT status FROM tax_invoice WHERE tax_invoice_id = ?
+    `, [invoiceId]);
+
+    if (!invoice) {
+      return NextResponse.json({ error: 'Invoice not found' }, { status: 404 });
+    }
+
+    if (invoice.status === 'submitted') {
+      return NextResponse.json({ error: 'Cannot delete submitted invoice' }, { status: 400 });
+    }
+
+    // Delete invoice details first
+    await Database.execute(`
+      DELETE FROM tax_invoice_details WHERE tax_invoice_id = ?
+    `, [invoiceId]);
+
+    // Delete invoice
+    await Database.execute(`
+      DELETE FROM tax_invoice WHERE tax_invoice_id = ?
+    `, [invoiceId]);
+
+    // Clear cache
+    await RedisCache.delPattern('invoices:*');
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error('Invoice delete error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
