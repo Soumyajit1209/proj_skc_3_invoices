@@ -10,6 +10,9 @@ const dbConfig = {
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+  acquireTimeout: 60000,
+  timeout: 60000,
+  reconnect: true
 };
 
 // Create connection pool
@@ -77,7 +80,7 @@ export class Database {
     }
   }
 
-  // Build pagination queries
+  // Build pagination queries with correct SQL syntax
   static buildPaginationQuery(
     baseQuery: string, 
     page: number, 
@@ -90,12 +93,16 @@ export class Database {
     let whereClause = '';
     let params = [...(searchParams || [])];
     
-    if (searchCondition) {
+    if (searchCondition && searchCondition.trim()) {
       whereClause = `WHERE ${searchCondition}`;
     }
     
+    // For the main query: SELECT ... FROM ... WHERE ... ORDER BY ... LIMIT ... OFFSET ...
+    // Note: We'll add ORDER BY externally, so we just add LIMIT and OFFSET here
     const sql = `${baseQuery} ${whereClause} LIMIT ${limit} OFFSET ${offset}`;
-    const countSql = `SELECT COUNT(*) as total FROM (${baseQuery.replace(/SELECT.*FROM/i, 'SELECT 1 FROM')}) as count_query ${whereClause}`;
+    
+    // For count query: SELECT COUNT(*) FROM (...) WHERE ...
+    const countSql = `SELECT COUNT(*) as total FROM (${baseQuery.replace(/SELECT.*?FROM/i, 'SELECT 1 FROM')}) as count_query ${whereClause}`;
     
     return { sql, countSql, params };
   }
